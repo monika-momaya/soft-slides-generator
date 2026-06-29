@@ -325,4 +325,34 @@ if EXCEL is not None:
 
                 disp = display_name(name)
                 nw, _ = text_size(d, disp, nf)
-                d.text((x + (photo_w - nw) / 2, y + photo_h + 8), disp, font=nf, fill=(255, 
+                d.text((x + (photo_w - nw) / 2, y + photo_h + 8), disp, font=nf, fill=(255, 235, 80, 255))
+
+                title_w, _ = text_size(d, title, tf)
+                comp_w, _ = text_size(d, company, cf)
+                d.text((x + (photo_w - title_w) / 2, y + photo_h + 25), title, font=tf, fill=(240, 240, 240, 255))
+                d.text((x + (photo_w - comp_w) / 2, y + photo_h + 43), company, font=cf, fill=(240, 240, 240, 255))
+
+                rl = role_label(role)
+                if rl in LEADERSHIP_ROLES:
+                    d.text((x + photo_w / 2, y - 22), rl, font=rf, fill=(255, 255, 255, 255), anchor='mm')
+            return img
+
+        slide_img = render_slide(st.session_state.order, parsed)
+        buf = io.BytesIO()
+        slide_img.save(buf, format='PNG')
+
+        ppt = Presentation()
+        ppt.slide_width = Inches(13.333)
+        ppt.slide_height = Inches(7.5)
+        slide = ppt.slides.add_slide(ppt.slide_layouts[6])
+        tmp = OUTPUT_DIR / f'softslide_{st.session_state.version}_1.png'
+        tmp.write_bytes(buf.getvalue())
+        slide.shapes.add_picture(str(tmp), 0, 0, width=ppt.slide_width, height=ppt.slide_height)
+
+        ppt_buf = io.BytesIO()
+        ppt.save(ppt_buf)
+        ppt_buf.seek(0)
+        st.download_button('Download PNG', data=buf.getvalue(), file_name=f'soft_slide_v{st.session_state.version}.png', mime='image/png')
+        st.download_button('Download PPTX', data=ppt_buf.getvalue(), file_name=f'soft_slide_v{st.session_state.version}.pptx', mime='application/vnd.openxmlformats-officedocument.presentationml.presentation')
+        st.session_state.version += 1
+        st.success('Generated 1 slide.')
