@@ -1,6 +1,4 @@
-from pathlib import Path
-base = Path('output/soft_slides_app')
-app_code = '''import io, math, re
+import io, math, re
 from pathlib import Path
 import streamlit as st
 import pandas as pd
@@ -30,8 +28,6 @@ if 'order' not in st.session_state:
     st.session_state.order = []
 if 'version' not in st.session_state:
     st.session_state.version = 1
-if 'photo_map_manual' not in st.session_state:
-    st.session_state.photo_map_manual = {}
 
 ROLE_PRIORITY = {'MODERATOR': 0, 'CO-MODERATOR': 1, 'CHAIR': 2, 'CO-CHAIR': 3, 'KEYNOTE': 4, 'KEYNOTE SPEAKER': 4, 'PANELIST': 5, 'SPEAKER': 6}
 LEADERSHIP_ROLES = {'MODERATOR', 'CO-MODERATOR', 'CHAIR', 'CO-CHAIR', 'KEYNOTE', 'KEYNOTE SPEAKER'}
@@ -144,9 +140,8 @@ def parse_row(row):
 
 def normalize_photo_key(name):
     s = clean(name)
-    s = s.replace('h e ', '').replace('he ', '')
-    s = s.replace('shri ', '').replace('smt ', '').replace('dr ', '').replace('prof ', '')
-    s = s.replace('mr ', '').replace('mrs ', '').replace('ms ', '')
+    for prefix in ['h e ', 'he ', 'shri ', 'smt ', 'dr ', 'prof ', 'mr ', 'mrs ', 'ms ']:
+        s = s.replace(prefix, '')
     return clean(s)
 
 
@@ -211,8 +206,6 @@ def group_label(rows):
     roles = [r[0] for r in rows if r[0]]
     if any(clean(r).upper().startswith('PANELIST') for r in roles):
         return 'PANELISTS'
-    if any(clean(r).upper().startswith('SPEAKER') for r in roles):
-        return 'SPEAKERS'
     return 'SPEAKERS'
 
 
@@ -256,7 +249,6 @@ if EXCEL is not None:
         st.subheader('Photo matching review')
         photo_map = {Path(f.name).stem: f for f in PHOTOS}
         assigned, parsed_rows = assign_photos(df, st.session_state.order, photo_map)
-        photo_names = list(photo_map.keys())
         for idx, row in zip(st.session_state.order, parsed_rows):
             role, name, title, company = row
             matched = assigned[idx]
@@ -313,8 +305,7 @@ if EXCEL is not None:
             photo_h = int(photo_w * cutout_size[1] / cutout_size[0]) if cutout_size[0] else photo_w
             photo_h = max(photo_h, 1)
 
-            group = group_label(parsed_rows)
-            d.text((int(W * 0.50), int(H * 0.22)), group, font=get_font(font_path, 24), fill=(255, 255, 255, 255), anchor='mm')
+            d.text((int(W * 0.50), int(H * 0.22)), group_label(parsed_rows), font=get_font(font_path, 24), fill=(255, 255, 255, 255), anchor='mm')
 
             for pos, (idx, rowdata) in enumerate(zip(indices, parsed_rows)):
                 role, name, title, company = rowdata
@@ -325,13 +316,10 @@ if EXCEL is not None:
                 if matched_key:
                     ph = Image.open(photo_map[matched_key]).convert('RGBA')
                     ph = ImageOps.fit(ph, (photo_w, photo_h), method=Image.Resampling.LANCZOS, centering=(0.5, 0.33))
-                    mask = Image.open(CUTOUT).convert('RGBA').resize((photo_w, photo_h))
-                    alpha = mask.split()[-1] if mask.mode == 'RGBA' else None
-                    if alpha is None:
-                        alpha = Image.new('L', (photo_w, photo_h), 255)
-                    img.paste(ph, (x, y), alpha)
+                    mask = cutout_img.resize((photo_w, photo_h)).split()[-1]
+                    img.paste(ph, (x, y), mask)
                 else:
-                    outline = Image.open(CUTOUT).convert('RGBA').resize((photo_w, photo_h))
+                    outline = cutout_img.convert('RGBA').resize((photo_w, photo_h))
                     img.alpha_composite(outline, (x, y))
                     d.text((x, y + photo_h + 2), f'No photo for {name}', font=get_font(font_path, 8), fill=(255, 180, 180, 255))
 
@@ -368,8 +356,3 @@ if EXCEL is not None:
         st.download_button('Download PPTX', data=ppt_buf.getvalue(), file_name=f'soft_slide_v{st.session_state.version}.pptx', mime='application/vnd.openxmlformats-officedocument.presentationml.presentation')
         st.session_state.version += 1
         st.success('Generated 1 slide.')
-'''
-(base / 'app.py').write_text(app_code)
-(base / 'script.py').write_text('from pathlib import Path\nimport runpy\nrunpy.run_path(str(Path(__file__).with_name("app.py")), run_name="__main__")\n')
-(base / 'requirements.txt').write_text('streamlit\npandas\npillow\npython-pptx\nopenpyxl\n')
-print('written')

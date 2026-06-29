@@ -1,14 +1,13 @@
 # Soft Slides Generator
 
-This is the app files folder.
-
-Files:
+Files in this folder:
 - app.py
+- script.py
 - requirements.txt
-- README.md
 
-Run locally:
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+Run locally with: streamlit run app.py
+
+
+Deployment note: use app.py as the Streamlit main file.
+
+Updated script in app.py for testing.
