@@ -111,31 +111,14 @@ def display_name(v):
     return v
 
 
-def parse_row(row):
+def extract_role_from_row(row):
     vals = [safe(x).strip() for x in row.tolist() if safe(x).strip()]
-    role = ''
-    name = ''
-    extras = []
-    for v in vals:
-        up = v.upper()
-        if any(k in up for k in ['MODERATOR', 'CO-MODERATOR', 'CHAIR', 'CO-CHAIR', 'KEYNOTE', 'PANELIST', 'SPEAKER']):
-            role = v
-        elif not name:
-            name = v
-        else:
-            extras.append(v)
-    title, company = '', ''
-    if len(extras) >= 2:
-        title, company = extras[0], extras[1]
-    elif len(extras) == 1:
-        tc = extras[0]
-        if '|' in tc:
-            title, company = [x.strip() for x in tc.split('|', 1)]
-        elif ',' in tc:
-            title, company = [x.strip() for x in tc.split(',', 1)]
-        else:
-            title = tc
-    return role, name, title, company
+    if not vals:
+        return ''
+    first = vals[0].upper()
+    if first in ['MODERATOR', 'CO-MODERATOR', 'CHAIR', 'CO-CHAIR', 'KEYNOTE', 'KEYNOTE SPEAKER', 'SPEAKER', 'PANELIST']:
+        return vals[0]
+    return ''
 
 
 def normalize_photo_key(name):
@@ -167,9 +150,9 @@ def score_match(name, filename):
 def assign_photos(df, order, photo_map):
     assigned = {}
     used = set()
-    rows = [parse_row(df.iloc[i]) for i in order]
+    rows = [df.iloc[i] for i in order]
     for idx, row in zip(order, rows):
-        name = row[1]
+        name = safe(row.iloc[0]) if len(row) else ''
         best = None
         best_score = 0
         for fname in photo_map:
@@ -182,7 +165,7 @@ def assign_photos(df, order, photo_map):
         assigned[idx] = best if best_score >= 20 else None
         if best and best_score >= 20:
             used.add(best)
-    return assigned, rows
+    return assigned
 
 
 def role_label(role):
@@ -198,13 +181,6 @@ def role_label(role):
     if 'KEYNOTE' in r:
         return 'KEYNOTE SPEAKER'
     return ''
-
-
-def group_label(rows):
-    roles = [r[0] for r in rows if r[0]]
-    if any(clean(r).upper().startswith('PANELIST') for r in roles):
-        return 'PANELISTS'
-    return 'SPEAKERS'
 
 
 def layout(n):
@@ -230,12 +206,13 @@ if EXCEL is not None:
         st.session_state.order = list(df.index)
 
     st.subheader('Reorder speakers')
-    st.caption('Leadership roles stay first when possible.')
+    st.caption('Leadership roles stay first when explicitly provided.')
     for i, idx in enumerate(list(st.session_state.order)):
         cols = st.columns([6, 1, 1])
         row = df.iloc[idx]
-        row_role, row_name, _, _ = parse_row(row)
-        cols[0].write(f'{i+1}. {row_name or safe(row.iloc[0])} {"(" + row_role + ")" if row_role else ""}')
+        row_role = extract_role_from_row(row)
+        row_name = safe(row.iloc[0]) if len(row) else ''
+        cols[0].write(f'{i+1}. {row_name} {"(" + row_role + ")" if row_role else ""}')
         if cols[1].button('▲', key=f'u{idx}', disabled=i == 0):
             st.session_state.order[i - 1], st.session_state.order[i] = st.session_state.order[i], st.session_state.order[i - 1]
             st.rerun()
@@ -246,14 +223,14 @@ if EXCEL is not None:
     if PHOTOS:
         st.subheader('Photo matching review')
         photo_map = {Path(f.name).stem: f for f in PHOTOS}
-        assigned, parsed_rows = assign_photos(df, st.session_state.order, photo_map)
-        for idx, row in zip(st.session_state.order, parsed_rows):
-            role, name, title, company = row
-            matched = assigned[idx]
+        assigned = assign_photos(df, st.session_state.order, photo_map)
+        for idx in st.session_state.order:
+            row = df.iloc[idx]
+            name = safe(row.iloc[0]) if len(row) else ''
             cols = st.columns([3, 2, 4])
             cols[0].write(name)
-            cols[1].write(matched if matched else 'NO MATCH')
-            cols[2].write(role_label(role) or '')
+            cols[1].write(assigned.get(idx) if assigned.get(idx) else 'NO MATCH')
+            cols[2].write('')
 
     if st.button('Generate Downloads'):
         if TEMPLATE is None or CUTOUT is None:
@@ -264,7 +241,7 @@ if EXCEL is not None:
             st.stop()
 
         photo_map = {Path(f.name).stem: f for f in PHOTOS}
-        assigned, parsed = assign_photos(df, st.session_state.order, photo_map)
+        assigned = assign_photos(df, st.session_state.order, photo_map)
         base_img = Image.open(TEMPLATE).convert('RGBA')
         cutout_img = Image.open(CUTOUT).convert('RGBA')
         cutout_size = cutout_img.size
@@ -276,40 +253,60 @@ if EXCEL is not None:
             font_path = OUTPUT_DIR / FONT_FILE.name
             font_path.write_bytes(FONT_FILE.getbuffer())
 
+        parsed = []
+        for i in st.session_state.order:
+            row = df.iloc[i]
+            vals = [safe(x).strip() for x in row.tolist() if safe(x).strip()]
+            role = extract_role_from_row(row)
+            if role and len(vals) > 1:
+                vals = vals[1:]
+            elif not role and vals:
+                vals = vals[1:]
+            name = safe(row.iloc[0]) if len(row) else ''
+            title = vals[0] if len(vals) > 0 else ''
+            company = vals[1] if len(vals) > 1 else ''
+            parsed.append((role, name, title, company))
+
         names = [p[1] for p in parsed]
         name_size = fit_font(base_draw, names, font_path, start=14, min_size=8, max_width=int(W * 0.16))
         title_size = max(8, name_size - 2)
         role_size = max(8, title_size)
+        header_size = 26
+        small_size = 16
 
         def render_slide(indices, parsed_rows):
             img = base_img.copy()
             d = ImageDraw.Draw(img)
-            for txt, base_fs, y_ratio in [(EVENT_NAME, 24, 0.07), (HALL_NAME, 18, 0.13), (DATE_TEXT, 16, 0.17)]:
+
+            header_y = int(H * 0.045)
+            hall_y = int(H * 0.085)
+            date_y = int(H * 0.115)
+            for txt, y, fs in [(EVENT_NAME, header_y, header_size), (HALL_NAME, hall_y, small_size), (DATE_TEXT, date_y, small_size)]:
                 if txt.strip():
-                    fs = fit_font(d, [txt], font_path, start=base_fs, min_size=8, max_width=int(W * 0.75))
                     f = get_font(font_path, fs)
-                    tw, _ = text_size(d, txt, f)
-                    d.text(((W - tw) / 2, int(H * y_ratio)), txt, font=f, fill=(255, 255, 255, 255))
+                    tw, th = text_size(d, txt, f)
+                    d.text(((W - tw) / 2, y), txt, font=f, fill=(255, 255, 255, 255))
 
             n = len(indices)
             cols, rows = layout(n)
-            x_margin = int(W * 0.05)
-            y_start = int(H * 0.24)
+            x_margin = int(W * 0.06)
+            y_start = int(H * 0.30)
             usable_w = W - 2 * x_margin
-            usable_h = int(H * 0.62)
+            usable_h = int(H * 0.54)
             cell_w = usable_w / cols
             cell_h = usable_h / rows
-            photo_w = int(min(cell_w, cell_h) * 0.68)
+            photo_w = int(min(cell_w, cell_h) * 0.72)
             photo_h = int(photo_w * cutout_size[1] / cutout_size[0]) if cutout_size[0] else photo_w
             photo_h = max(photo_h, 1)
 
-            d.text((int(W * 0.50), int(H * 0.22)), group_label(parsed_rows), font=get_font(font_path, 24), fill=(255, 255, 255, 255), anchor='mm')
+            d.text((int(W * 0.50), int(H * 0.24)), 'SPEAKERS', font=get_font(font_path, 20), fill=(255, 255, 255, 255), anchor='mm')
 
             for pos, (idx, rowdata) in enumerate(zip(indices, parsed_rows)):
                 role, name, title, company = rowdata
                 row, col = divmod(pos, cols)
                 x = int(x_margin + col * cell_w + (cell_w - photo_w) / 2)
                 y = int(y_start + row * cell_h)
+
                 matched_key = assigned.get(idx)
                 if matched_key:
                     ph = Image.open(photo_map[matched_key]).convert('RGBA')
@@ -325,34 +322,7 @@ if EXCEL is not None:
                 tf = get_font(font_path, title_size)
                 cf = get_font(font_path, title_size)
                 rf = get_font(font_path, role_size)
+
                 disp = display_name(name)
                 nw, _ = text_size(d, disp, nf)
-                d.text((x + (photo_w - nw) / 2, y + photo_h + 8), disp, font=nf, fill=(255, 235, 80, 255))
-                title_w, _ = text_size(d, title, tf)
-                comp_w, _ = text_size(d, company, cf)
-                d.text((x + (photo_w - title_w) / 2, y + photo_h + 25), title, font=tf, fill=(240, 240, 240, 255))
-                d.text((x + (photo_w - comp_w) / 2, y + photo_h + 43), company, font=cf, fill=(240, 240, 240, 255))
-                rl = role_label(role)
-                if rl in LEADERSHIP_ROLES:
-                    d.text((x + photo_w / 2, y - 22), rl, font=rf, fill=(255, 255, 255, 255), anchor='mm')
-            return img
-
-        slide_img = render_slide(st.session_state.order, parsed)
-        buf = io.BytesIO()
-        slide_img.save(buf, format='PNG')
-
-        ppt = Presentation()
-        ppt.slide_width = Inches(13.333)
-        ppt.slide_height = Inches(7.5)
-        slide = ppt.slides.add_slide(ppt.slide_layouts[6])
-        tmp = OUTPUT_DIR / f'softslide_{st.session_state.version}_1.png'
-        tmp.write_bytes(buf.getvalue())
-        slide.shapes.add_picture(str(tmp), 0, 0, width=ppt.slide_width, height=ppt.slide_height)
-
-        ppt_buf = io.BytesIO()
-        ppt.save(ppt_buf)
-        ppt_buf.seek(0)
-        st.download_button('Download PNG', data=buf.getvalue(), file_name=f'soft_slide_v{st.session_state.version}.png', mime='image/png')
-        st.download_button('Download PPTX', data=ppt_buf.getvalue(), file_name=f'soft_slide_v{st.session_state.version}.pptx', mime='application/vnd.openxmlformats-officedocument.presentationml.presentation')
-        st.session_state.version += 1
-        st.success('Generated 1 slide.')
+                d.text((x + (photo_w - nw) / 2, y + photo_h + 8), disp, font=nf, fill=(255, 
