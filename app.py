@@ -1,8 +1,10 @@
-import io, math, re
+import io
+import re
 from pathlib import Path
-import streamlit as st
+
 import pandas as pd
-from PIL import Image, ImageOps, ImageDraw, ImageFont
+import streamlit as st
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 from pptx import Presentation
 from pptx.util import Inches
 
@@ -12,26 +14,24 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 st.set_page_config(page_title='Soft Slides Generator', layout='wide')
 st.title('Conference Soft Slides Generator')
-st.caption('Upload template, speaker cutout PNG, Excel, photos, and optional font.')
+st.caption('Upload template, placeholder PNG, Excel, photos, and optional font.')
 
 TEMPLATE = st.file_uploader('Upload flat template image', type=['png', 'jpg', 'jpeg'])
-CUTOUT = st.file_uploader('Upload single speaker cutout PNG (transparent)', type=['png'])
+CUTOUT = st.file_uploader('Upload speaker placeholder PNG', type=['png'])
 EXCEL = st.file_uploader('Upload speaker Excel', type=['xlsx', 'xls'])
-PHOTOS = st.file_uploader('Upload speaker photos folder (multiple files)', type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
+PHOTOS = st.file_uploader('Upload speaker photos', type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
 FONT_FILE = st.file_uploader('Upload font file (optional)', type=['ttf', 'otf'])
 EVENT_NAME = st.text_input('Event / session title', value='')
 HALL_NAME = st.text_input('Hall name', value='')
 DATE_TEXT = st.text_input('Date text', value='')
-SHOW_LEADERSHIP = st.checkbox('Show leadership roles above photos only', value=True)
 
 if 'order' not in st.session_state:
     st.session_state.order = []
-if 'version' not in st.session_state:
-    st.session_state.version = 1
+if 'mapping' not in st.session_state:
+    st.session_state.mapping = {}
 
-ROLE_PRIORITY = {'MODERATOR': 0, 'CO-MODERATOR': 1, 'CHAIR': 2, 'CO-CHAIR': 3, 'KEYNOTE': 4, 'KEYNOTE SPEAKER': 4, 'PANELIST': 5, 'SPEAKER': 6}
-LEADERSHIP_ROLES = {'MODERATOR', 'CO-MODERATOR', 'CHAIR', 'CO-CHAIR', 'KEYNOTE', 'KEYNOTE SPEAKER'}
-FIELD_HINT = {'role': ['role'], 'speaker name': ['speaker name', 'name'], 'title': ['title', 'designation'], 'company': ['company', 'org', 'organization']}
+ROLE_PRIORITY = ['MODERATOR', 'CO-MODERATOR', 'CHAIR', 'CO-CHAIR', 'KEYNOTE', 'KEYNOTE SPEAKER', 'PANELIST', 'SPEAKER']
+LEADERSHIP = {'MODERATOR', 'CO-MODERATOR', 'CHAIR', 'CO-CHAIR', 'KEYNOTE', 'KEYNOTE SPEAKER'}
 
 
 def safe(v):
@@ -39,42 +39,18 @@ def safe(v):
 
 
 def clean(s):
-    s = re.sub(r'[^a-z0-9]+', ' ', safe(s).lower())
-    return re.sub(r'\s+', ' ', s).strip()
+    return re.sub(r'\s+', ' ', re.sub(r'[^a-z0-9]+', ' ', safe(s).lower())).strip()
 
 
-def tokens(s):
-    return [t for t in clean(s).split() if t]
+def strip_prefixes(s):
+    s = clean(s)
+    for p in ['h e ', 'he ', 'shri ', 'smt ', 'dr ', 'prof ', 'mr ', 'mrs ', 'ms ']:
+        s = s.replace(p, '')
+    return clean(s)
 
 
-def pick_col(cols, candidates):
-    lower = {str(c).lower().strip(): c for c in cols}
-    for cand in candidates:
-        if cand in lower:
-            return lower[cand]
-    return cols[0] if len(cols) else None
-
-
-def role_rank(role):
-    r = clean(role).upper()
-    for k, v in ROLE_PRIORITY.items():
-        kk = clean(k).upper()
-        if r == kk or kk in r:
-            return v
-    return 99
-
-
-def ordered_indices_by_role(df):
-    role_col = pick_col(df.columns, FIELD_HINT['role'])
-    if not role_col:
-        return list(df.index)
-    roles = df[role_col].astype(str).fillna('')
-    return sorted(df.index.tolist(), key=lambda i: (role_rank(roles.loc[i]), i))
-
-
-def text_size(draw, txt, font):
-    box = draw.textbbox((0, 0), txt, font=font)
-    return box[2] - box[0], box[3] - box[1]
+def name_tokens(s):
+    return [t for t in strip_prefixes(s).split() if t]
 
 
 def get_font(font_path, size):
@@ -91,14 +67,49 @@ def get_font(font_path, size):
     return ImageFont.load_default()
 
 
-def fit_font(draw, texts, font_path, start=12, min_size=7.5, max_width=300):
+def text_size(draw, txt, font):
+    box = draw.textbbox((0, 0), txt, font=font)
+    return box[2] - box[0], box[3] - box[1]
+
+
+def fit_font(draw, texts, font_path, start, min_size, max_width):
     size = start
     while size >= min_size:
         f = get_font(font_path, size)
-        if all(text_size(draw, safe(t), f)[0] <= max_width for t in texts):
+        if all(text_size(draw, t, f)[0] <= max_width for t in texts):
             return size
         size -= 0.5
     return min_size
+
+
+def role_from_row(row):
+    vals = [safe(x).strip() for x in row.tolist() if safe(x).strip()]
+    for v in vals:
+        if clean(v).upper() in ROLE_PRIORITY:
+            return v
+    return ''
+
+
+def pick_name(row):
+    vals = [safe(x).strip() for x in row.tolist() if safe(x).strip()]
+    if not vals:
+        return ''
+    r = role_from_row(row)
+    if r and clean(vals[0]).upper() == clean(r).upper() and len(vals) > 1:
+        return vals[1]
+    return vals[0]
+
+
+def pick_title_company(row):
+    vals = [safe(x).strip() for x in row.tolist() if safe(x).strip()]
+    r = role_from_row(row)
+    if r and vals and clean(vals[0]).upper() == clean(r).upper():
+        vals = vals[1:]
+    elif vals:
+        vals = vals[1:]
+    title = vals[0] if len(vals) > 0 else ''
+    company = vals[1] if len(vals) > 1 else ''
+    return title, company
 
 
 def display_name(v):
@@ -111,76 +122,31 @@ def display_name(v):
     return v
 
 
-def extract_role_from_row(row):
-    vals = [safe(x).strip() for x in row.tolist() if safe(x).strip()]
-    if not vals:
-        return ''
-    first = vals[0].upper()
-    if first in ['MODERATOR', 'CO-MODERATOR', 'CHAIR', 'CO-CHAIR', 'KEYNOTE', 'KEYNOTE SPEAKER', 'SPEAKER', 'PANELIST']:
-        return vals[0]
-    return ''
-
-
-def normalize_photo_key(name):
-    s = clean(name)
-    for prefix in ['h e ', 'he ', 'shri ', 'smt ', 'dr ', 'prof ', 'mr ', 'mrs ', 'ms ']:
-        s = s.replace(prefix, '')
-    return clean(s)
-
-
-def score_match(name, filename):
-    n = normalize_photo_key(name)
-    f = normalize_photo_key(filename)
-    nt = tokens(n)
-    ft = tokens(f)
+def match_score(name, filename):
+    n = strip_prefixes(name)
+    f = strip_prefixes(filename)
+    nt = name_tokens(n)
+    ft = name_tokens(f)
     if not n or not f:
         return 0
     if n == f:
         return 100
     if nt and ft and nt[-1] == ft[-1] and len(nt[-1]) > 2:
-        return 90
-    common = len(set(nt) & set(ft))
-    if common:
-        return 20 + common * 10
+        return 92 if len(set(nt) & set(ft)) >= 1 else 80
     if n in f or f in n:
-        return 50
-    return 0
+        return 70
+    common = len(set(nt) & set(ft))
+    return 20 + common * 10 if common else 0
 
 
-def assign_photos(df, order, photo_map):
-    assigned = {}
-    used = set()
-    rows = [df.iloc[i] for i in order]
-    for idx, row in zip(order, rows):
-        name = safe(row.iloc[0]) if len(row) else ''
-        best = None
-        best_score = 0
-        for fname in photo_map:
-            if fname in used:
-                continue
-            sc = score_match(name, fname)
-            if sc > best_score:
-                best = fname
-                best_score = sc
-        assigned[idx] = best if best_score >= 20 else None
-        if best and best_score >= 20:
-            used.add(best)
-    return assigned
-
-
-def role_label(role):
-    r = clean(role).upper()
-    if 'CO-MODERATOR' in r:
-        return 'CO-MODERATOR'
-    if 'MODERATOR' in r:
-        return 'MODERATOR'
-    if 'CO-CHAIR' in r:
-        return 'CO-CHAIR'
-    if 'CHAIR' in r:
-        return 'CHAIR'
-    if 'KEYNOTE' in r:
-        return 'KEYNOTE SPEAKER'
-    return ''
+def unique_match(name, photo_names, used):
+    scored = [(match_score(name, p), p) for p in photo_names if p not in used]
+    scored.sort(reverse=True)
+    if not scored or scored[0][0] < 20:
+        return None, 0, scored[:5]
+    top = scored[0][0]
+    tied = [p for s, p in scored if s == top]
+    return (tied[0] if len(tied) == 1 else None), top, scored[:5]
 
 
 def layout(n):
@@ -200,159 +166,144 @@ if EXCEL is not None:
     st.subheader('Speaker Data')
     st.dataframe(df, use_container_width=True)
 
-    if st.button('Auto order by role'):
-        st.session_state.order = ordered_indices_by_role(df)
+    if st.button('Build speaker order from role priority'):
+        rows = []
+        for i in df.index:
+            row = df.iloc[i]
+            role = role_from_row(row)
+            rows.append((i, 0 if clean(role).upper().startswith('MODERATOR') else 1 if 'CHAIR' in clean(role).upper() else 2, i))
+        rows.sort()
+        st.session_state.order = [r[0] for r in rows]
+
     if not st.session_state.order:
         st.session_state.order = list(df.index)
 
-    st.subheader('Reorder speakers')
-    st.caption('Leadership roles stay first when explicitly provided.')
+    st.subheader('Manual order')
     for i, idx in enumerate(list(st.session_state.order)):
-        cols = st.columns([6, 1, 1])
+        c1, c2, c3 = st.columns([6, 1, 1])
         row = df.iloc[idx]
-        row_role = extract_role_from_row(row)
-        row_name = safe(row.iloc[0]) if len(row) else ''
-        cols[0].write(f'{i+1}. {row_name} {"(" + row_role + ")" if row_role else ""}')
-        if cols[1].button('▲', key=f'u{idx}', disabled=i == 0):
+        nm = pick_name(row)
+        rl = role_from_row(row)
+        c1.write(f'{i+1}. {nm} {"(" + rl + ")" if rl else ""}')
+        if c2.button('▲', key=f'u{idx}', disabled=i == 0):
             st.session_state.order[i - 1], st.session_state.order[i] = st.session_state.order[i], st.session_state.order[i - 1]
             st.rerun()
-        if cols[2].button('▼', key=f'd{idx}', disabled=i == len(st.session_state.order) - 1):
+        if c3.button('▼', key=f'd{idx}', disabled=i == len(st.session_state.order) - 1):
             st.session_state.order[i + 1], st.session_state.order[i] = st.session_state.order[i], st.session_state.order[i + 1]
             st.rerun()
 
     if PHOTOS:
-        st.subheader('Photo matching review')
+        st.subheader('Preview matches')
         photo_map = {Path(f.name).stem: f for f in PHOTOS}
-        assigned = assign_photos(df, st.session_state.order, photo_map)
+        photo_names = list(photo_map.keys())
+        used = set()
+        mapping = {}
         for idx in st.session_state.order:
             row = df.iloc[idx]
-            name = safe(row.iloc[0]) if len(row) else ''
-            cols = st.columns([3, 2, 4])
-            cols[0].write(name)
-            cols[1].write(assigned.get(idx) if assigned.get(idx) else 'NO MATCH')
-            cols[2].write('')
+            nm = pick_name(row)
+            best, score, top5 = unique_match(nm, photo_names, used)
+            mapping[idx] = best
+            if best:
+                used.add(best)
+            c1, c2, c3, c4 = st.columns([3, 2, 1, 4])
+            c1.write(nm)
+            c2.write(best if best else 'NO MATCH')
+            c3.write(score)
+            c4.write(', '.join([f'{p}:{s}' for s, p in top5]))
+        st.session_state.mapping = mapping
+        st.caption('If any match is wrong, rename the photo file or move the row order before generating.')
 
-    if st.button('Generate Downloads'):
+    if st.button('Generate Output'):
         if TEMPLATE is None or CUTOUT is None:
-            st.error('Template and cutout PNG are required.')
+            st.error('Template and placeholder PNG are required.')
             st.stop()
         if not PHOTOS:
             st.error('Please upload speaker photos.')
             st.stop()
 
         photo_map = {Path(f.name).stem: f for f in PHOTOS}
-        assigned = assign_photos(df, st.session_state.order, photo_map)
-        base_img = Image.open(TEMPLATE).convert('RGBA')
-        cutout_img = Image.open(CUTOUT).convert('RGBA')
-        cutout_size = cutout_img.size
-        W, H = base_img.size
-        base_draw = ImageDraw.Draw(base_img)
-
-        font_path = None
+        base = Image.open(TEMPLATE).convert('RGBA')
+        cutout = Image.open(CUTOUT).convert('RGBA')
+        W, H = base.size
+        d = ImageDraw.Draw(base)
+        fp = None
         if FONT_FILE is not None:
-            font_path = OUTPUT_DIR / FONT_FILE.name
-            font_path.write_bytes(FONT_FILE.getbuffer())
+            fp = OUTPUT_DIR / FONT_FILE.name
+            fp.write_bytes(FONT_FILE.getbuffer())
 
-        parsed = []
-        for i in st.session_state.order:
-            row = df.iloc[i]
-            vals = [safe(x).strip() for x in row.tolist() if safe(x).strip()]
-            role = extract_role_from_row(row)
-            if role and len(vals) > 1:
-                vals = vals[1:]
-            elif not role and vals:
-                vals = vals[1:]
-            name = safe(row.iloc[0]) if len(row) else ''
-            title = vals[0] if len(vals) > 0 else ''
-            company = vals[1] if len(vals) > 1 else ''
-            parsed.append((role, name, title, company))
+        def centered(txt, y, size, fill=(255, 255, 255, 255)):
+            if not txt.strip():
+                return
+            f = get_font(fp, size)
+            tw, _ = text_size(d, txt, f)
+            d.text(((W - tw) / 2, y), txt, font=f, fill=fill)
 
-        names = [p[1] for p in parsed]
-        name_size = fit_font(base_draw, names, font_path, start=14, min_size=8, max_width=int(W * 0.16))
-        title_size = max(8, name_size - 2)
-        role_size = max(8, title_size)
-        header_size = 26
-        small_size = 16
+        centered(EVENT_NAME, int(H * 0.04), 34)
+        centered(HALL_NAME, int(H * 0.08), 20)
+        centered(DATE_TEXT, int(H * 0.11), 20)
+        centered('SPEAKERS', int(H * 0.24), 22)
 
-        def render_slide(indices, parsed_rows):
-            img = base_img.copy()
-            d = ImageDraw.Draw(img)
+        names = [pick_name(df.iloc[i]) for i in st.session_state.order]
+        name_sz = fit_font(d, names, fp, 16, 8, int(W * 0.16))
+        title_sz = max(8, name_sz - 2)
+        role_sz = max(8, title_sz)
 
-            header_y = int(H * 0.045)
-            hall_y = int(H * 0.085)
-            date_y = int(H * 0.115)
-            for txt, y, fs in [(EVENT_NAME, header_y, header_size), (HALL_NAME, hall_y, small_size), (DATE_TEXT, date_y, small_size)]:
-                if txt.strip():
-                    f = get_font(font_path, fs)
-                    tw, th = text_size(d, txt, f)
-                    d.text(((W - tw) / 2, y), txt, font=f, fill=(255, 255, 255, 255))
+        cols, rows = layout(len(st.session_state.order))
+        x_margin = int(W * 0.06)
+        y_start = int(H * 0.30)
+        usable_w = W - 2 * x_margin
+        usable_h = int(H * 0.54)
+        cell_w = usable_w / cols
+        cell_h = usable_h / rows
+        photo_w = int(min(cell_w, cell_h) * 0.72)
+        photo_h = int(photo_w * cutout.size[1] / cutout.size[0]) if cutout.size[0] else photo_w
+        mask = cutout.resize((photo_w, photo_h)).split()[-1]
 
-            n = len(indices)
-            cols, rows = layout(n)
-            x_margin = int(W * 0.06)
-            y_start = int(H * 0.30)
-            usable_w = W - 2 * x_margin
-            usable_h = int(H * 0.54)
-            cell_w = usable_w / cols
-            cell_h = usable_h / rows
-            photo_w = int(min(cell_w, cell_h) * 0.72)
-            photo_h = int(photo_w * cutout_size[1] / cutout_size[0]) if cutout_size[0] else photo_w
-            photo_h = max(photo_h, 1)
+        for pos, idx in enumerate(st.session_state.order):
+            row = df.iloc[idx]
+            nm = pick_name(row)
+            rl = role_from_row(row)
+            title, company = pick_title_company(row)
+            r, c = divmod(pos, cols)
+            x = int(x_margin + c * cell_w + (cell_w - photo_w) / 2)
+            y = int(y_start + r * cell_h)
 
-            d.text((int(W * 0.50), int(H * 0.24)), 'SPEAKERS', font=get_font(font_path, 20), fill=(255, 255, 255, 255), anchor='mm')
+            mapped = st.session_state.mapping.get(idx)
+            if mapped and mapped in photo_map:
+                ph = Image.open(photo_map[mapped]).convert('RGBA')
+                ph = ImageOps.fit(ph, (photo_w, photo_h), method=Image.Resampling.LANCZOS, centering=(0.5, 0.33))
+                base.paste(ph, (x, y), mask)
+            else:
+                outline = cutout.resize((photo_w, photo_h))
+                base.alpha_composite(outline, (x, y))
 
-            for pos, (idx, rowdata) in enumerate(zip(indices, parsed_rows)):
-                role, name, title, company = rowdata
-                row, col = divmod(pos, cols)
-                x = int(x_margin + col * cell_w + (cell_w - photo_w) / 2)
-                y = int(y_start + row * cell_h)
+            name_f = get_font(fp, name_sz)
+            title_f = get_font(fp, title_sz)
+            comp_f = get_font(fp, title_sz)
+            role_f = get_font(fp, role_sz)
 
-                matched_key = assigned.get(idx)
-                if matched_key:
-                    ph = Image.open(photo_map[matched_key]).convert('RGBA')
-                    ph = ImageOps.fit(ph, (photo_w, photo_h), method=Image.Resampling.LANCZOS, centering=(0.5, 0.33))
-                    mask = cutout_img.resize((photo_w, photo_h)).split()[-1]
-                    img.paste(ph, (x, y), mask)
-                else:
-                    outline = cutout_img.convert('RGBA').resize((photo_w, photo_h))
-                    img.alpha_composite(outline, (x, y))
-                    d.text((x, y + photo_h + 2), f'No photo for {name}', font=get_font(font_path, 8), fill=(255, 180, 180, 255))
+            disp = display_name(nm)
+            nw, _ = text_size(d, disp, name_f)
+            d.text((x + (photo_w - nw) / 2, y + photo_h + 8), disp, font=name_f, fill=(255, 235, 80, 255))
+            tw, _ = text_size(d, title, title_f)
+            cw, _ = text_size(d, company, comp_f)
+            d.text((x + (photo_w - tw) / 2, y + photo_h + 25), title, font=title_f, fill=(240, 240, 240, 255))
+            d.text((x + (photo_w - cw) / 2, y + photo_h + 43), company, font=comp_f, fill=(240, 240, 240, 255))
+            lab = role_from_row(row)
+            if lab and clean(lab).upper() in LEADERSHIP:
+                d.text((x + photo_w / 2, y - 20), lab.upper(), font=role_f, fill=(255, 255, 255, 255), anchor='mm')
 
-                nf = get_font(font_path, name_size)
-                tf = get_font(font_path, title_size)
-                cf = get_font(font_path, title_size)
-                rf = get_font(font_path, role_size)
-
-                disp = display_name(name)
-                nw, _ = text_size(d, disp, nf)
-                d.text((x + (photo_w - nw) / 2, y + photo_h + 8), disp, font=nf, fill=(255, 235, 80, 255))
-
-                title_w, _ = text_size(d, title, tf)
-                comp_w, _ = text_size(d, company, cf)
-                d.text((x + (photo_w - title_w) / 2, y + photo_h + 25), title, font=tf, fill=(240, 240, 240, 255))
-                d.text((x + (photo_w - comp_w) / 2, y + photo_h + 43), company, font=cf, fill=(240, 240, 240, 255))
-
-                rl = role_label(role)
-                if rl in LEADERSHIP_ROLES:
-                    d.text((x + photo_w / 2, y - 22), rl, font=rf, fill=(255, 255, 255, 255), anchor='mm')
-            return img
-
-        slide_img = render_slide(st.session_state.order, parsed)
         buf = io.BytesIO()
-        slide_img.save(buf, format='PNG')
-
+        base.save(buf, format='PNG')
         ppt = Presentation()
         ppt.slide_width = Inches(13.333)
         ppt.slide_height = Inches(7.5)
         slide = ppt.slides.add_slide(ppt.slide_layouts[6])
-        tmp = OUTPUT_DIR / f'softslide_{st.session_state.version}_1.png'
+        tmp = OUTPUT_DIR / 'softslide_render.png'
         tmp.write_bytes(buf.getvalue())
         slide.shapes.add_picture(str(tmp), 0, 0, width=ppt.slide_width, height=ppt.slide_height)
-
         ppt_buf = io.BytesIO()
         ppt.save(ppt_buf)
         ppt_buf.seek(0)
-        st.download_button('Download PNG', data=buf.getvalue(), file_name=f'soft_slide_v{st.session_state.version}.png', mime='image/png')
-        st.download_button('Download PPTX', data=ppt_buf.getvalue(), file_name=f'soft_slide_v{st.session_state.version}.pptx', mime='application/vnd.openxmlformats-officedocument.presentationml.presentation')
-        st.session_state.version += 1
-        st.success('Generated 1 slide.')
+        st.download_button('Download PNG', data=buf.getvalue(), file_name='soft_slide.png', mime='image/png')
+        st.download_button('Download PPTX', data=ppt_buf.getvalue(), file_name='soft_slide.pptx', mime='application/vnd.openxmlformats-officedocument.presentationml.presentation')
