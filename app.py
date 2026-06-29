@@ -53,13 +53,17 @@ def name_tokens(s):
     return [t for t in strip_prefixes(s).split() if t]
 
 
-def get_font(font_path, size):
+def get_font(font_path, size, bold=False):
     if font_path and font_path.exists():
         try:
             return ImageFont.truetype(str(font_path), int(round(size)))
         except Exception:
             pass
-    for p in ['/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', '/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf']:
+    candidates = [
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf' if bold else '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        '/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf' if bold else '/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf',
+    ]
+    for p in candidates:
         try:
             return ImageFont.truetype(p, int(round(size)))
         except Exception:
@@ -72,10 +76,10 @@ def text_size(draw, txt, font):
     return box[2] - box[0], box[3] - box[1]
 
 
-def fit_font(draw, texts, font_path, start, min_size, max_width):
+def fit_font(draw, texts, font_path, start, min_size, max_width, bold=False):
     size = start
     while size >= min_size:
-        f = get_font(font_path, size)
+        f = get_font(font_path, size, bold=bold)
         if all(text_size(draw, t, f)[0] <= max_width for t in texts):
             return size
         size -= 0.5
@@ -149,6 +153,19 @@ def unique_match(name, photo_names, used):
     return (tied[0] if len(tied) == 1 else None), top, scored[:5]
 
 
+def split_rows(df):
+    rows = []
+    for i in df.index:
+        row = df.iloc[i]
+        role = role_from_row(row)
+        name = pick_name(row)
+        title, company = pick_title_company(row)
+        rows.append((i, role, name, title, company))
+    mod = [r for r in rows if clean(r[1]).upper().startswith('MODERATOR') or 'CHAIR' in clean(r[1]).upper()]
+    others = [r for r in rows if r not in mod]
+    return mod, others
+
+
 def layout(n):
     if n <= 2:
         return 2, 1
@@ -211,7 +228,6 @@ if EXCEL is not None:
             c3.write(score)
             c4.write(', '.join([f'{p}:{s}' for s, p in top5]))
         st.session_state.mapping = mapping
-        st.caption('If any match is wrong, rename the photo file or move the row order before generating.')
 
     if st.button('Generate Output'):
         if TEMPLATE is None or CUTOUT is None:
@@ -231,20 +247,25 @@ if EXCEL is not None:
             fp = OUTPUT_DIR / FONT_FILE.name
             fp.write_bytes(FONT_FILE.getbuffer())
 
-        def centered(txt, y, size, fill=(255, 255, 255, 255)):
+        def centered(txt, y, size, fill=(255, 255, 255, 255), bold=False):
             if not txt.strip():
                 return
-            f = get_font(fp, size)
+            f = get_font(fp, size, bold=bold)
             tw, _ = text_size(d, txt, f)
             d.text(((W - tw) / 2, y), txt, font=f, fill=fill)
 
-        centered(EVENT_NAME, int(H * 0.04), 34)
-        centered(HALL_NAME, int(H * 0.08), 20)
-        centered(DATE_TEXT, int(H * 0.11), 20)
-        centered('SPEAKERS', int(H * 0.24), 22)
+        header_y = int(H * 0.02)
+        title_size = 22
+        sub_size = 13
+        centered(EVENT_NAME, header_y, title_size, bold=True)
+        centered(HALL_NAME, header_y + 34, sub_size)
+        centered(DATE_TEXT, header_y + 54, sub_size)
+
+        centered('MODERATOR', int(H * 0.24), 16)
+        centered('SPEAKERS', int(H * 0.24), 16)
 
         names = [pick_name(df.iloc[i]) for i in st.session_state.order]
-        name_sz = fit_font(d, names, fp, 16, 8, int(W * 0.16))
+        name_sz = fit_font(d, names, fp, 15, 8, int(W * 0.16))
         title_sz = max(8, name_sz - 2)
         role_sz = max(8, title_sz)
 
@@ -259,39 +280,71 @@ if EXCEL is not None:
         photo_h = int(photo_w * cutout.size[1] / cutout.size[0]) if cutout.size[0] else photo_w
         mask = cutout.resize((photo_w, photo_h)).split()[-1]
 
-        for pos, idx in enumerate(st.session_state.order):
-            row = df.iloc[idx]
-            nm = pick_name(row)
-            rl = role_from_row(row)
-            title, company = pick_title_company(row)
-            r, c = divmod(pos, cols)
-            x = int(x_margin + c * cell_w + (cell_w - photo_w) / 2)
-            y = int(y_start + r * cell_h)
-
-            mapped = st.session_state.mapping.get(idx)
-            if mapped and mapped in photo_map:
-                ph = Image.open(photo_map[mapped]).convert('RGBA')
-                ph = ImageOps.fit(ph, (photo_w, photo_h), method=Image.Resampling.LANCZOS, centering=(0.5, 0.33))
-                base.paste(ph, (x, y), mask)
+        mod_indices = []
+        speaker_indices = []
+        for idx in st.session_state.order:
+            rl = role_from_row(df.iloc[idx])
+            cr = clean(rl).upper()
+            if cr.startswith('MODERATOR') or 'CHAIR' in cr:
+                mod_indices.append(idx)
             else:
-                outline = cutout.resize((photo_w, photo_h))
-                base.alpha_composite(outline, (x, y))
+                speaker_indices.append(idx)
 
-            name_f = get_font(fp, name_sz)
-            title_f = get_font(fp, title_sz)
-            comp_f = get_font(fp, title_sz)
-            role_f = get_font(fp, role_sz)
+        def render_group(indices, x0, x1, y0, label=None):
+            if label:
+                d.text(((x0 + x1) / 2, y0 - 26), label, font=get_font(fp, 18), fill=(255, 255, 255, 255), anchor='mm')
+            if not indices:
+                return
+            gcols, grows = layout(len(indices))
+            gw = x1 - x0
+            cell_w2 = gw / gcols
+            cell_h2 = usable_h / grows
+            photo_w2 = int(min(cell_w2, cell_h2) * 0.72)
+            photo_h2 = int(photo_w2 * cutout.size[1] / cutout.size[0]) if cutout.size[0] else photo_w2
+            mask2 = cutout.resize((photo_w2, photo_h2)).split()[-1]
 
-            disp = display_name(nm)
-            nw, _ = text_size(d, disp, name_f)
-            d.text((x + (photo_w - nw) / 2, y + photo_h + 8), disp, font=name_f, fill=(255, 235, 80, 255))
-            tw, _ = text_size(d, title, title_f)
-            cw, _ = text_size(d, company, comp_f)
-            d.text((x + (photo_w - tw) / 2, y + photo_h + 25), title, font=title_f, fill=(240, 240, 240, 255))
-            d.text((x + (photo_w - cw) / 2, y + photo_h + 43), company, font=comp_f, fill=(240, 240, 240, 255))
-            lab = role_from_row(row)
-            if lab and clean(lab).upper() in LEADERSHIP:
-                d.text((x + photo_w / 2, y - 20), lab.upper(), font=role_f, fill=(255, 255, 255, 255), anchor='mm')
+            for pos, idx in enumerate(indices):
+                row = df.iloc[idx]
+                nm = pick_name(row)
+                rl = role_from_row(row)
+                title, company = pick_title_company(row)
+                r, c = divmod(pos, gcols)
+                x = int(x0 + c * cell_w2 + (cell_w2 - photo_w2) / 2)
+                y = int(y0 + r * cell_h2)
+
+                mapped = st.session_state.mapping.get(idx)
+                if mapped and mapped in photo_map:
+                    ph = Image.open(photo_map[mapped]).convert('RGBA')
+                    ph = ImageOps.fit(ph, (photo_w2, photo_h2), method=Image.Resampling.LANCZOS, centering=(0.5, 0.33))
+                    base.paste(ph, (x, y), mask2)
+                else:
+                    outline = cutout.resize((photo_w2, photo_h2))
+                    base.alpha_composite(outline, (x, y))
+
+                name_f = get_font(fp, name_sz)
+                title_f = get_font(fp, title_sz)
+                comp_f = get_font(fp, title_sz)
+                role_f = get_font(fp, role_sz)
+
+                disp = display_name(nm)
+                nw, _ = text_size(d, disp, name_f)
+                d.text((x + (photo_w2 - nw) / 2, y + photo_h2 + 8), disp, font=name_f, fill=(255, 235, 80, 255))
+                tw, _ = text_size(d, title, title_f)
+                cw, _ = text_size(d, company, comp_f)
+                d.text((x + (photo_w2 - tw) / 2, y + photo_h2 + 25), title, font=title_f, fill=(240, 240, 240, 255))
+                d.text((x + (photo_w2 - cw) / 2, y + photo_h2 + 43), company, font=comp_f, fill=(240, 240, 240, 255))
+                if clean(rl).upper() in LEADERSHIP:
+                    d.text((x + photo_w2 / 2, y - 20), rl.upper(), font=role_f, fill=(255, 255, 255, 255), anchor='mm')
+
+        top_start = int(H * 0.30)
+        area_h = int(H * 0.54)
+        left_x0 = int(W * 0.05)
+        left_x1 = int(W * 0.36)
+        right_x0 = int(W * 0.42)
+        right_x1 = int(W * 0.95)
+
+        render_group(mod_indices, left_x0, left_x1, top_start, label='MODERATOR / CHAIR')
+        render_group(speaker_indices, right_x0, right_x1, top_start, label='SPEAKERS')
 
         buf = io.BytesIO()
         base.save(buf, format='PNG')
