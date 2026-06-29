@@ -12,7 +12,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 st.set_page_config(page_title='Soft Slides Generator', layout='wide')
 st.title('Conference Soft Slides Generator')
-st.caption('Upload template, speaker cutout, Excel, photos, and optional font.')
+st.caption('Upload template, speaker cutout PNG, Excel, photos, and optional font.')
 
 TEMPLATE = st.file_uploader('Upload flat template image', type=['png', 'jpg', 'jpeg'])
 CUTOUT = st.file_uploader('Upload single speaker cutout PNG (transparent)', type=['png'])
@@ -172,18 +172,16 @@ def assign_photos(df, order, photo_map):
         name = row[1]
         best = None
         best_score = 0
-        for fname, fileobj in photo_map.items():
+        for fname in photo_map:
             if fname in used:
                 continue
             sc = score_match(name, fname)
             if sc > best_score:
                 best = fname
                 best_score = sc
-        if best_score >= 20:
-            assigned[idx] = best
+        assigned[idx] = best if best_score >= 20 else None
+        if best and best_score >= 20:
             used.add(best)
-        else:
-            assigned[idx] = None
     return assigned, rows
 
 
@@ -222,7 +220,7 @@ def layout(n):
 
 
 if EXCEL is not None:
-    df = pd.read_excel(EXCEL)
+    df = pd.read_excel(EXCEL, header=None)
     st.subheader('Speaker Data')
     st.dataframe(df, use_container_width=True)
 
@@ -330,11 +328,13 @@ if EXCEL is not None:
                 disp = display_name(name)
                 nw, _ = text_size(d, disp, nf)
                 d.text((x + (photo_w - nw) / 2, y + photo_h + 8), disp, font=nf, fill=(255, 235, 80, 255))
+                title_w, _ = text_size(d, title, tf)
+                comp_w, _ = text_size(d, company, cf)
+                d.text((x + (photo_w - title_w) / 2, y + photo_h + 25), title, font=tf, fill=(240, 240, 240, 255))
+                d.text((x + (photo_w - comp_w) / 2, y + photo_h + 43), company, font=cf, fill=(240, 240, 240, 255))
                 rl = role_label(role)
                 if rl in LEADERSHIP_ROLES:
                     d.text((x + photo_w / 2, y - 22), rl, font=rf, fill=(255, 255, 255, 255), anchor='mm')
-                d.text((x, y + photo_h + 25), title, font=tf, fill=(240, 240, 240, 255))
-                d.text((x, y + photo_h + 43), company, font=cf, fill=(240, 240, 240, 255))
             return img
 
         slide_img = render_slide(st.session_state.order, parsed)
