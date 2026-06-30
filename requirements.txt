@@ -1,5 +1,7 @@
-streamlit
-pandas
-pillow
-python-pptx
-openpyxl
+streamlit>=1.30
+pillow>=10.0
+numpy>=1.24
+opencv-python-headless>=4.8
+pandas>=2.0
+openpyxl>=3.1
+python-pptx>=1.0
